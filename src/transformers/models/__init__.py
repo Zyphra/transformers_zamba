@@ -274,4 +274,5 @@ from . import (
     xmod,
     yolos,
     yoso,
+    zamba,
 )
