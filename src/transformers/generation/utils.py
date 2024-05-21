@@ -2613,6 +2613,7 @@ class GenerationMixin:
                         "xlnet",
                         "cpm",
                         "jamba",
+                        "zamba",
                     ]
                 ):
                     raise RuntimeError(
