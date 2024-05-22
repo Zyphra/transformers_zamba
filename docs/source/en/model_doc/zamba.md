@@ -1,4 +1,4 @@
-# Zamba [add link to img. Change Zamba-7B-v1 to Zamba-v1?]
+# Zamba [add link to img]
 
 Zamba is a large language model (LLM) trained by Zyphra, and made available under an Apache 2.0 license. Please see the [Zyphra Hugging Face](https://huggingface.co/collections/zyphra/) repository for model weights.
 
@@ -25,7 +25,7 @@ pip install mamba-ssm causal-conv1d>=1.2.0
 ```
 You also have to have the model on a CUDA device.
 
-You can run the model not using the optimized Mamba kernels, but it is **not** recommended as it will result in significantly lower latencies. In order to do that, you'll need to specify `use_mamba_kernels=False` when loading the model.
+You can run the model not using the optimized Mamba kernels, but it is **not** recommended as it will result in significantly higher latency. In order to do that, you'll need to specify `use_mamba_kernels=False` when loading the model.
 
 ## Inference
 
@@ -33,8 +33,8 @@ You can run the model not using the optimized Mamba kernels, but it is **not** r
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
-tokenizer = AutoTokenizer.from_pretrained("Zyphra/Zamba-v1")
-model = AutoModelForCausalLM.from_pretrained("Zyphra/Zamba-v1", device_map="auto", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained("Zyphra/Zamba-7B-v1")
+model = AutoModelForCausalLM.from_pretrained("Zyphra/Zamba-7B-v1", device_map="auto", torch_dtype=torch.bfloat16)
 
 input_text = "A funny prompt would be "
 input_ids = tokenizer(input_text, return_tensors="pt").to("cuda")
