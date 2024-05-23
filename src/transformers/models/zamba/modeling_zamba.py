@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Zamba model."""
-
+import time
 import inspect
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -704,14 +704,22 @@ class ZambaMambaMixer(nn.Module):
         )
         
         # 1. Gated linear projection
+        torch.cuda.synchronize()
+        start = time.time()
         projected_states = self.in_proj(hidden_states).transpose(1, 2)
-        
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_0
+        timing_0 += end - start
+        torch.cuda.synchronize()
+        start = time.time()
         hidden_states, gate = projected_states.view(batch_size, -1, 2, seq_len).chunk(2, dim=2)
         hidden_states = hidden_states.squeeze(2).contiguous()
         gate = gate.squeeze(2)
         gate = gate.reshape(batch_size, self.n_mamba_heads, -1, seq_len).transpose(0,1)                  # (h b d l)
         
         # 2. Convolution sequence transformation
+        
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         if use_precomputed_states:
             hidden_states = causal_conv1d_update(
@@ -727,17 +735,26 @@ class ZambaMambaMixer(nn.Module):
                 conv_states = nn.functional.pad(hidden_states, (self.conv_kernel_size - hidden_states.shape[-1], 0))
                 cache_params.conv_states[self.layer_idx].copy_(conv_states)
             hidden_states = causal_conv1d_fn(hidden_states, conv_weights, self.conv1d.bias, self.activation)
-        
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_5
+        timing_5 += end - start
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        
+        torch.cuda.synchronize()
+        start = time.time()
         hidden_states = hidden_states.reshape(-1, self.n_mamba_heads, self.intermediate_size//self.n_mamba_heads, seq_len).transpose(0, 1) # (h b d l)
         ssm_parameters = (self.x_proj_weight[:,None,:,:] @ hidden_states).transpose(-1, -2) # (h b l d)
         
         time_step, B, C = torch.split(
             ssm_parameters, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1
         ) # (h b l d)
-        
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_6
+        timing_6 += end - start
+        torch.cuda.synchronize()
+        start = time.time()
         discrete_time_step = (self.dt_proj_weight[:,None] @ time_step.transpose(-1, -2)) # (h b d l)
         
         A = -torch.exp(self.A_log.float())
@@ -745,10 +762,15 @@ class ZambaMambaMixer(nn.Module):
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = self.dt_proj_bias.float() if self.dt_proj_bias is not None else None
         scan_outputs = torch.empty((batch_size, 0, seq_len), device=hidden_states.device, dtype=hidden_states.dtype)
-        
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_7
+        timing_7 += end - start
         if use_precomputed_states:
             
             for n in range(self.n_mamba_heads):
+                torch.cuda.synchronize()
+                start = time.time()
                 scan_outputs_ = selective_state_update(
                     cache_params.ssm_states[self.layer_idx][:, n],
                     hidden_states[n, ..., 0],
@@ -762,9 +784,13 @@ class ZambaMambaMixer(nn.Module):
                     dt_softplus=True,
                 ).unsqueeze(-1)
                 scan_outputs = torch.cat((scan_outputs, scan_outputs_), dim=1)
-            
+                torch.cuda.synchronize()
+                end = time.time()
+                global timing_4
+                timing_4 += end - start
         else:
-            
+            torch.cuda.synchronize()
+            start = time.time()
             ssm_state = torch.empty((batch_size, 0, self.intermediate_size // self.n_mamba_heads, self.ssm_state_size), device=hidden_states.device, dtype=hidden_states.dtype)
             for n in range(self.n_mamba_heads):
                 scan_outputs_, ssm_state_ = selective_scan_fn(
@@ -783,11 +809,21 @@ class ZambaMambaMixer(nn.Module):
                 ssm_state = torch.cat((ssm_state, ssm_state_.unsqueeze(1)), dim=1)
             if ssm_state is not None and cache_params is not None:
                 cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
+            torch.cuda.synchronize()
+            end = time.time()
+            global timing_1
+            timing_1 += end - start
             
 
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))        
+        torch.cuda.synchronize()
+        start = time.time()
+        contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))    
+        torch.cuda.synchronize()    
+        end = time.time()
+        global timing_2
+        timing_2 += end - start
         return contextualized_states
 
     def slow_forward(self, input_states, cache_params: HybridMambaAttentionDynamicCache = None):
@@ -1005,12 +1041,16 @@ class ZambaMambaDecoderLayer(nn.Module):
 
         hidden_states = hidden_states + from_tf if from_tf is not None else hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        
+        torch.cuda.synchronize()
+        start = time.time()
         hidden_states = self.mamba(
             hidden_states=hidden_states,
             cache_params=past_key_value,
         )
-        
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_3
+        timing_3 += end - start
         self_attn_weights = None
 
         # residual connection after mamba
@@ -1399,6 +1439,22 @@ class ZambaForCausalLM(ZambaPreTrainedModel):
         self.model = ZambaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        global timing_0
+        timing_0 = 0.0
+        global timing_1
+        timing_1 = 0.0
+        global timing_2
+        timing_2 = 0.0
+        global timing_3
+        timing_3 = 0.0
+        global timing_4
+        timing_4 = 0.0
+        global timing_5
+        timing_5 = 0.0
+        global timing_6
+        timing_6 = 0.0
+        global timing_7
+        timing_7 = 0.0
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1495,6 +1551,17 @@ class ZambaForCausalLM(ZambaPreTrainedModel):
             logits = self.lm_head(hidden_states)
         else:
             logits = self.lm_head(hidden_states[..., -num_logits_to_keep:, :])
+
+        global timing_0
+        global timing_1
+        global timing_2
+        global timing_3
+        global timing_4
+        global timing_5
+        global timing_6
+        global timing_7
+        print(f"Timings:\nMamba layer: {timing_3}, in_proj: {timing_0}, ssm without cache: {timing_1}, ssm with cache: {timing_4}, out_proj: {timing_2}")
+        print(f"cnn: {timing_5}, x_proj: {timing_6}, delta: {timing_7}")
         logits = logits.float()
 
         loss = None

@@ -193,9 +193,14 @@ class ZambaConfig(PretrainedConfig):
 
     @property
     def layers_block_type(self):
-        layers = ["mamba", "mamba", "attention+mamba",] + \
+        layers = ["mamba", "mamba", "mamba",] + \
             [
-                "attention+mamba" if i % self.attn_layer_period == self.attn_layer_offset else "mamba"
+                "mamba" if i % self.attn_layer_period == self.attn_layer_offset else "mamba"
                 for i in range(self.num_hidden_layers - 3)
             ]
+        # layers = ["mamba", "mamba", "attention+mamba",] + \
+        #     [
+        #         "attention+mamba" if i % self.attn_layer_period == self.attn_layer_offset else "mamba"
+        #         for i in range(self.num_hidden_layers - 3)
+        #     ]
         return layers

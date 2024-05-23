@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch MAMBA model."""
-
+import time
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
@@ -146,8 +146,13 @@ class MambaMixer(nn.Module):
 
     def cuda_kernels_forward(self, hidden_states: torch.Tensor, cache_params: Optional[MambaCache] = None):
         # 1. Gated MLP's linear projection
+        torch.cuda.synchronize()
+        start = time.time()
         projected_states = self.in_proj(hidden_states).transpose(1, 2)
-
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_0
+        timing_0 += end - start
         if self.training and cache_params is None:  # Doesn't support outputting the states -> used for training
             contextualized_states = mamba_inner_fn(
                 projected_states,
@@ -166,9 +171,12 @@ class MambaMixer(nn.Module):
             )
 
         else:
+            torch.cuda.synchronize()
+            start = time.time()
             hidden_states, gate = projected_states.chunk(2, dim=1)
 
             # 2. Convolution sequence transformation
+            
             conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             if cache_params is not None and cache_params.seqlen_offset > 0:
                 hidden_states = causal_conv1d_update(
@@ -188,19 +196,37 @@ class MambaMixer(nn.Module):
                 hidden_states = causal_conv1d_fn(
                     hidden_states, conv_weights, self.conv1d.bias, activation=self.activation
                 )
-
+            torch.cuda.synchronize()
+            end = time.time()
+            global timing_5
+            timing_5 += end - start
+            
             # 3. State Space Model sequence transformation
             # 3.a. input varying initialization of time_step, B and C
+            torch.cuda.synchronize()
+            start = time.time()
             ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
             time_step, B, C = torch.split(
                 ssm_parameters, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1
             )
+            torch.cuda.synchronize()
+            end = time.time()
+            global timing_6
+            timing_6 += end - start
+            torch.cuda.synchronize()
+            start = time.time()
             discrete_time_step = self.dt_proj.weight @ time_step.transpose(1, 2)
 
             A = -torch.exp(self.A_log.float())
             # 3.c perform the recurrence y ← SSM(A, B, C)(x)
             time_proj_bias = self.dt_proj.bias.float() if hasattr(self.dt_proj, "bias") else None
+            torch.cuda.synchronize()
+            end = time.time()
+            global timing_7
+            timing_7 += end - start
             if cache_params is not None and cache_params.seqlen_offset > 0:
+                torch.cuda.synchronize()
+                start = time.time()
                 scan_outputs = selective_state_update(
                     cache_params.ssm_states[self.layer_idx],
                     hidden_states[..., 0],
@@ -213,7 +239,13 @@ class MambaMixer(nn.Module):
                     time_proj_bias,
                     dt_softplus=True,
                 ).unsqueeze(-1)
+                torch.cuda.synchronize()
+                end = time.time()
+                global timing_4
+                timing_4 += end - start
             else:
+                torch.cuda.synchronize()
+                start = time.time()
                 scan_outputs, ssm_state = selective_scan_fn(
                     hidden_states,
                     discrete_time_step,
@@ -228,9 +260,19 @@ class MambaMixer(nn.Module):
                 )
                 if ssm_state is not None and cache_params is not None:
                     cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
+                torch.cuda.synchronize()
+                end = time.time()
+                global timing_1
+                timing_1 += end - start
 
             # 4. Final linear projection
+            torch.cuda.synchronize()
+            start = time.time()
             contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))
+            torch.cuda.synchronize()
+            end = time.time()
+            global timing_2
+            timing_2 += end - start
         return contextualized_states
 
     # fmt: off
@@ -337,8 +379,13 @@ class MambaBlock(nn.Module):
         hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
-
+        torch.cuda.synchronize()
+        start = time.time()
         hidden_states = self.mixer(hidden_states, cache_params=cache_params)
+        torch.cuda.synchronize()
+        end = time.time()
+        global timing_3
+        timing_3 += end - start
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -610,6 +657,22 @@ class MambaForCausalLM(MambaPreTrainedModel):
         super().__init__(config)
         self.backbone = MambaModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        global timing_0
+        timing_0 = 0.0
+        global timing_1
+        timing_1 = 0.0
+        global timing_2
+        timing_2 = 0.0
+        global timing_3
+        timing_3 = 0.0
+        global timing_4
+        timing_4 = 0.0
+        global timing_5
+        timing_5 = 0.0
+        global timing_6
+        timing_6 = 0.0
+        global timing_7
+        timing_7 = 0.0
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -682,6 +745,16 @@ class MambaForCausalLM(MambaPreTrainedModel):
         hidden_states = mamba_outputs[0]
 
         logits = self.lm_head(hidden_states.to(self.lm_head.weight.dtype)).float()
+        global timing_0
+        global timing_1
+        global timing_2
+        global timing_3
+        global timing_4
+        global timing_5
+        global timing_6
+        global timing_7
+        print(f"Timings:\nMamba layer: {timing_3}, in_proj: {timing_0}, ssm without cache: {timing_1}, ssm with cache: {timing_4}, out_proj: {timing_2}")
+        print(f"cnn: {timing_5}, x_proj: {timing_6}, delta: {timing_7}")
 
         loss = None
         if labels is not None:
